@@ -1,0 +1,16 @@
+*~
+*.o
+*.lo
+*.la
+*.d
+*.so
+*.so.0
+*.so.1
+*.pc
+*.a
+*.tar.*
+*.spec
+.libs
+.deps
+pcimax_ctl
+

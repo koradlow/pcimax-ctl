@@ -1,0 +1,27 @@
+pcimax-ctl
+---------
+
+installation:
+this program has no special dependencies
+default installation path is /usr/local/bin
+installation path can be changed by setting PREFIX variable
+(sudo make PREFIX=/opt install)
+
+make
+sudo make install
+sudo make uninstall
+
+development status:
+this program is still in an very early development stage. 
+Expect bugs and missing features and please report problems to
+https://github.com/koradlow/pcimax-ctl/issues
+
+licence: 
+all code is released under the GNU General Public License version 2 (GPLv2)
+
+latest version:
+you can always find the latest version of this tool in the git repo:
+https://github.com/koradlow/pcimax-ctl.github
+
+contact:
+Konke Radlow <koradlow@gmail.com>
