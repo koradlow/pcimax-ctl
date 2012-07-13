@@ -1,7 +1,7 @@
 #Define the compiler we want to use
 CC = gcc
 #Define the compiler options for this project
-CFLAGS += -Wall -O3 -std=c99
+CFLAGS += -Wall -O3 -std=gnu99
 #Define the libraries that are used for this project
 LDLIBS += 
 
