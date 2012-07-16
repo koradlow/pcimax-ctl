@@ -31,6 +31,19 @@
 #include <getopt.h>
 #include <time.h>
 
+/* define bits for bitmask that defines the settings that the user wants
+ * to update */
+#define PCIMAX_FM	0x01	/* FM related setting change requested */
+#define PCIMAX_RDS	0x02	/* RDS related setting change requested */
+#define PCIMAX_FREQ	0x10
+#define PCIMAX_PWR	0x20
+#define PCIMAX_STEREO	0x40
+#define PCIMAX_AF	0x80
+#define PCIMAX_RT	0x100
+#define PCIMAX_PI	0x200
+#define PCIMAX_PTY	0x400
+#define PCIMAX_PTYT	0x800
+
 static struct termios old_settings;
 
 /* short options */
@@ -38,20 +51,34 @@ enum Options{
 	OptSetDevice = 'd',
 	OptSetFreq = 'f',
 	OptHelp = 'h',
+	OptSetStereo = 64,
+	OptSetPower,
 	OptLast = 128
 };
 
 /* long options */
 static struct option long_options[] = {
 	{"device", required_argument, 0, OptSetDevice},
-	{"set-freq", required_argument, 0 , OptSetFreq},
+	{"set-freq", required_argument, 0, OptSetFreq},
+	{"set-stereo", required_argument, 0, OptSetStereo},
+	{"set-power", required_argument, 0, OptSetPower},
 	{"help", no_argument, 0, OptHelp},
 	{0, 0, 0, 0}
 };
 
+/* struct containing all available settings for the device */
+struct pcimax_settings {
+	uint32_t defined;
+	char device[80];
+	/** FM-Transmitter settings **/
+	uint32_t freq;	/* range 87500..108000 */
+	uint8_t power; 	/* range 0..100 */
+	char is_stereo; 
+};
+
 static char options[OptLast];
 
-void pcimax_set_settings(int fd, const struct termios *settings);
+static void pcimax_set_settings(int fd, const struct termios *settings);
 
 static void pcimax_usage_hint(void)
 {
@@ -62,10 +89,18 @@ static void pcimax_usage_common(void)
 {
 	printf("\navailable options: \n"
 	       "  --device=<device>\n"
-	       "                     set the target device, defaults to /dev/ttyUSB0\n"
+	       "                     set the target device\n"
+	       "                     default: /dev/ttyUSB0\n"
 	       "  --set-freq=<freq>\n"
 	       "                     set the frequency for the FM transmitter\n"
-	       "                     defaults to freq = 88.7\nS"
+	       "  --set-stereo=<true/false>\n"
+	       "                     set the transmitter into stereo / mono mode\n"
+	       "                     default = true => stereo\n"
+	       "                     !doesn't seem to have any effect\n"
+	       "  --set-power=<0..100>\n"
+	       "                     set the transmitter output power\n"
+	       "                     valid range: 0 .. 100\n"
+	       "                     !doesn't seem to have any effect\n"
 	       );
 }
 
@@ -79,7 +114,7 @@ static void pcimax_exit(int fd, bool reset)
 	exit(-1);
 }
 
-int pcimax_open_serial(const char* device)
+static int pcimax_open_serial(const char* device)
 {
 	int fd = -1; 
 	/* O_NONBLOCK -> return immediately
@@ -93,7 +128,7 @@ int pcimax_open_serial(const char* device)
 	return fd;
 }
 
-void pcimax_set_settings(int fd, const struct termios *settings)
+static void pcimax_set_settings(int fd, const struct termios *settings)
 {
 	/* TSCNOW -> change occurs immediately */
 	tcflush(fd, TCIFLUSH);
@@ -107,7 +142,7 @@ void pcimax_set_settings(int fd, const struct termios *settings)
  * input and output processing disabled)
  * @fd:		file descriptor for a terminal device
  * @ret_val:	0 on success, -1 on error */
-void pcimax_setup_serial(int fd)
+static void pcimax_setup_serial(int fd)
 {
 	struct termios new_settings;
 	uint32_t modem_ctl_ioctl;
@@ -150,7 +185,7 @@ void pcimax_setup_serial(int fd)
 
 /* wrapper for write function that performs error checking, and
  * terminates the program if an error is detected */
-int pcimax_write(int fd, const void *buf, size_t count)
+static int pcimax_write(int fd, const void *buf, size_t count)
 {
 	int wr_count = 0;
 	if ((wr_count = write(fd, buf, count)) == -1) {
@@ -163,7 +198,7 @@ int pcimax_write(int fd, const void *buf, size_t count)
 /* @cmd:	c string or char array with terminating null byte
  * @data:	c string or char array 
  * @data_count:	number of data bytes to transmit */
-void pcimax_send_command(int fd, const char *cmd, const char *data, size_t data_count)
+static void pcimax_send_command(int fd, const char *cmd, const char *data, size_t data_count)
 {
 	static const char start = 0x00;		/* start of new command */
 	static const char end_cmd = 0x01;	/* eof command, sof data */
@@ -180,15 +215,14 @@ void pcimax_send_command(int fd, const char *cmd, const char *data, size_t data_
 }
 
 /* encodes the integer frequency value into a string representation
- * @freq:	float range 87.500..108.000 
+ * @freq:	integer range 87500..108000 
  * @ret_val:	\0 terminated character array*/
-const char* pcimax_get_freq(double new_freq)
+static const char* pcimax_get_freq(uint32_t new_freq)
 {
-	int freq = new_freq * 1000;
 	static char freq_str[3] = {'0', '0', '\0'};
 	char high_byte = 0;
 	char low_byte = 0;
-	uint32_t freq_fifth = (uint32_t)(freq / 5);
+	uint32_t freq_fifth = (uint32_t)(new_freq / 5);
 	
 	/* chars 0x00, 0x01, 0x02 are reserved as special control characters
 	 * by the device -> add 4 to results */
@@ -202,7 +236,7 @@ const char* pcimax_get_freq(double new_freq)
 /* encodes the integer power value into a string representation
  * @power:	interger range 0..100
  * @ret_val:	\0 terminated array*/
-const char* pcimax_get_power(int power)
+static const char* pcimax_get_power(uint8_t power)
 {
 	static char power_str[2] = { 0x19, '\0'};
 
@@ -212,41 +246,58 @@ const char* pcimax_get_power(int power)
 	return power_str;
 }
 
-/* Updates / Sets the frequency of the FM Transmitter, sets the output
- * power and the transmission mode */
-void pcimax_set_freq(int fd, double new_freq)
+/* TODO: do the power & stereo settings have any effect? 
+ * -> submitting a value for "F0" command yields in no RDS transmission */
+/* Updates / Sets the FM Transmitter related settings
+ * Frequency, Output Power and Stero/Mono mode */
+static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *settings)
 {
-	/* TODO: send the user specified options to the device 
-	 * Right now only tries to change the frequency */
-	/* setting stereo mode */
-	pcimax_send_command(fd, "FS", "1", 1);
+	/* setting stereo / mono mode */
+	if (settings->defined & PCIMAX_STEREO)
+		pcimax_send_command(fd, "FS", &settings->is_stereo, 1);
 	/* setting transmitter frequency */
-	const char *freq = pcimax_get_freq(new_freq);
-	pcimax_send_command(fd, "FF", freq, 2);
+	if (settings->defined & PCIMAX_FREQ) {
+		const char *freq = pcimax_get_freq(settings->freq);
+		pcimax_send_command(fd, "FF", freq, 2);
+	}
 	/* setting output power */
-	const char *pow = pcimax_get_power(80);
-	pcimax_send_command(fd, "FO", pow, 0);
+	if (settings->defined & PCIMAX_PWR) {
+		const char *pow = pcimax_get_power(settings->power);
+		pcimax_send_command(fd, "FO", pow, 0);
+	}
 	/* store the settings, commit changes */
 	pcimax_send_command(fd, "FW", "0", 1);
+}
+
+/* initializes the settings structure with sensefull default values */
+static void pcimax_init_settings(struct pcimax_settings* settings)
+{
+	static const char *default_device = "/dev/ttyUSB0";
+	
+	strcpy(settings->device, default_device);
+	settings->freq = 88700;
+	settings->power = 100;
+	settings->is_stereo = true; 
 }
 
 int main(int argc, char* argv[])
 {
 	int fd = -1;
+	int i = 0;
 	int idx = 0;
 	int ch = 0;
-	double freq = 87.5;
+	double freq;
 	char device[80];	/* buffer for device name */
 	char short_options[26 * 2 * 2 + 1]; 	/*TODO: don't use magic number */
-	static const char *default_device = "/dev/ttyUSB0";
-	strcpy(device, default_device);
+	static struct pcimax_settings settings;
 	
+	pcimax_init_settings(&settings);
 	if (argc == 1) {
 		pcimax_usage_hint();
 		return 0;
 	}
 	/* parse command line options */
-	for (int i = 0; long_options[i].name; i++) {
+	for (i = 0; long_options[i].name; i++) {
 		if (!isalpha(long_options[i].val))
 			continue;
 		short_options[idx++] = long_options[i].val;
@@ -267,15 +318,27 @@ int main(int argc, char* argv[])
 		case OptSetDevice:
 			strncpy(device, optarg, 80);
 			if(access(optarg, F_OK) != -1)
-			for(int i=0; optarg[i]!='\0' && i<80; ++i)
-				device[i] = optarg[i];
+			for(i = 0; optarg[i]!='\0' && i<80; i++)
+				settings.device[i] = optarg[i];
 			else {
-				fprintf(stderr, "Unable to open device: %s\n", device);
+				fprintf(stderr, "Unable to open device: %s\n", optarg);
 				return -1;
 			}
+			settings.device[i+1] = '\0';
 			break; 
 		case OptSetFreq:
+			settings.defined |= PCIMAX_FREQ | PCIMAX_FM;
 			freq = strtod(optarg, NULL);
+			settings.freq = freq * 1000;
+			break;
+		case OptSetStereo:
+			settings.defined |= PCIMAX_STEREO | PCIMAX_FM;
+			settings.is_stereo = strcmp(optarg, "false")? '1' : '0';
+			break;
+		case OptSetPower:
+			settings.defined |= PCIMAX_PWR | PCIMAX_FM;
+			i = strtol(optarg, 0L, 0);
+			settings.power = (i >= 0 && i <= 100)? i : 100;
 			break;
 		case OptHelp:
 			pcimax_usage_common();
@@ -303,10 +366,13 @@ int main(int argc, char* argv[])
 	}
 
 	/* open the device(com port) and configure it */
-	fd = pcimax_open_serial(device);
+	fd = pcimax_open_serial(settings.device);
 	pcimax_setup_serial(fd);
-
-	pcimax_set_freq(fd, freq);
+	
+	/* change all requested settings */
+	if (settings.defined & PCIMAX_FM)
+		pcimax_set_fm_settings(fd, &settings);
+	if (settings.defined & PCIMAX_RDS);
 
 	/* restore settings & close the program  */
 	pcimax_exit(fd, true);
