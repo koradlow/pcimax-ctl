@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <sys/ioctl.h>
 #include <string.h>  /* String function definitions */
 #include <unistd.h>  /* UNIX standard function definitions */
 #include <fcntl.h>   /* File control definitions */
@@ -35,6 +36,7 @@ static struct termios old_settings;
 /* short options */
 enum Options{
 	OptSetDevice = 'd',
+	OptSetFreq = 'f',
 	OptHelp = 'h',
 	OptLast = 128
 };
@@ -42,6 +44,7 @@ enum Options{
 /* long options */
 static struct option long_options[] = {
 	{"device", required_argument, 0, OptSetDevice},
+	{"set-freq", required_argument, 0 , OptSetFreq},
 	{"help", no_argument, 0, OptHelp},
 	{0, 0, 0, 0}
 };
@@ -53,6 +56,17 @@ void pcimax_set_settings(int fd, const struct termios *settings);
 static void pcimax_usage_hint(void)
 {
 	fprintf(stderr, "Try 'rds-ctl --help' for more information.\n");
+}
+
+static void pcimax_usage_common(void)
+{
+	printf("\navailable options: \n"
+	       "  --device=<device>\n"
+	       "                     set the target device, defaults to /dev/ttyUSB0\n"
+	       "  --set-freq=<freq>\n"
+	       "                     set the frequency for the FM transmitter\n"
+	       "                     defaults to freq = 88.7\nS"
+	       );
 }
 
 /* resores the terminal settings to the state they were before the program
@@ -96,23 +110,40 @@ void pcimax_set_settings(int fd, const struct termios *settings)
 void pcimax_setup_serial(int fd)
 {
 	struct termios new_settings;
+	uint32_t modem_ctl_ioctl;
 	
 	/* Get the current settings for the port */
 	if (tcgetattr(fd, &old_settings)) {
 		perror("tcgetattr: ");
 		pcimax_exit(fd, false);
 	}
-
-	new_settings.c_cflag = B9600 | CRTSCTS | CS8  | CLOCAL | CREAD;
-	new_settings.c_iflag = IGNPAR;
-	new_settings.c_oflag = 0;
-	new_settings.c_lflag = 0;       //ICANON;
-	new_settings.c_cc[VMIN]=1;
-	new_settings.c_cc[VTIME]=0;
+	new_settings = old_settings;
+	
+	/* adopt the settings according to the requirements of the 
+	 * PCIMAX3000+ card */
+	new_settings.c_cflag = B9600 | CS8 | CREAD | CLOCAL;
+	new_settings.c_cflag &= ~CRTSCTS;
+	new_settings.c_iflag = IGNBRK;
+	new_settings.c_oflag = ONLCR;
+	new_settings.c_lflag = ECHOE | ECHOK | NOFLSH | ECHOCTL;
+	new_settings.c_line = 0;
+	new_settings.c_cc[VMIN] = 0;
+	new_settings.c_cc[VTIME] = 0;
+	new_settings.c_cc[VEOF] = 26; /* => ^Z */
+	/* disable {SUSP,  REPRINT, WERASE, LNEXT} characters */ 
+	new_settings.c_cc[VSUSP] = fpathconf(fd, _PC_VDISABLE);
+	new_settings.c_cc[VREPRINT] = fpathconf(fd, _PC_VDISABLE);
+	new_settings.c_cc[VWERASE] = fpathconf(fd, _PC_VDISABLE);
+	new_settings.c_cc[VLNEXT] = fpathconf(fd, _PC_VDISABLE);
 
 	/* Set the baud rates to 9600 */
 	cfsetispeed(&new_settings, B9600);
 	cfsetospeed(&new_settings, B9600);
+
+	/* enable the Request to Send line & Data Terminal Ready*/
+	ioctl(fd, TIOCMGET, &modem_ctl_ioctl);
+	modem_ctl_ioctl |= TIOCM_RTS | TIOCM_DTR;
+	ioctl(fd, TIOCMSET, &modem_ctl_ioctl);
 
 	pcimax_set_settings(fd, &new_settings);
 }
@@ -149,16 +180,18 @@ void pcimax_send_command(int fd, const char *cmd, const char *data, size_t data_
 }
 
 /* encodes the integer frequency value into a string representation
- * @freq:	interger range 87500..108000 
- * @ret_val:	\0 terminated array*/
-const char* pcimax_get_freq(int freq)
+ * @freq:	float range 87.500..108.000 
+ * @ret_val:	\0 terminated character array*/
+const char* pcimax_get_freq(double new_freq)
 {
+	int freq = new_freq * 1000;
 	static char freq_str[3] = {'0', '0', '\0'};
 	char high_byte = 0;
 	char low_byte = 0;
 	uint32_t freq_fifth = (uint32_t)(freq / 5);
 	
-	/* chars 0x00, 0x01, 0x02 are reserved -> add 4 to results */
+	/* chars 0x00, 0x01, 0x02 are reserved as special control characters
+	 * by the device -> add 4 to results */
 	high_byte = (char)((uint32_t)(freq_fifth / 128) + 4);
 	low_byte = (char)((freq_fifth - (uint32_t)(freq_fifth / 128) * 128) + 4);
 	freq_str[0] = low_byte;
@@ -179,15 +212,35 @@ const char* pcimax_get_power(int power)
 	return power_str;
 }
 
+/* Updates / Sets the frequency of the FM Transmitter, sets the output
+ * power and the transmission mode */
+void pcimax_set_freq(int fd, double new_freq)
+{
+	/* TODO: send the user specified options to the device 
+	 * Right now only tries to change the frequency */
+	/* setting stereo mode */
+	pcimax_send_command(fd, "FS", "1", 1);
+	/* setting transmitter frequency */
+	const char *freq = pcimax_get_freq(new_freq);
+	pcimax_send_command(fd, "FF", freq, 2);
+	/* setting output power */
+	const char *pow = pcimax_get_power(80);
+	pcimax_send_command(fd, "FO", pow, 0);
+	/* store the settings, commit changes */
+	pcimax_send_command(fd, "FW", "0", 1);
+}
+
 int main(int argc, char* argv[])
 {
 	int fd = -1;
 	int idx = 0;
 	int ch = 0;
+	double freq = 87.5;
 	char device[80];	/* buffer for device name */
 	char short_options[26 * 2 * 2 + 1]; 	/*TODO: don't use magic number */
-	char str_buf[20] = { '\0' };
-
+	static const char *default_device = "/dev/ttyUSB0";
+	strcpy(device, default_device);
+	
 	if (argc == 1) {
 		pcimax_usage_hint();
 		return 0;
@@ -220,8 +273,14 @@ int main(int argc, char* argv[])
 				fprintf(stderr, "Unable to open device: %s\n", device);
 				return -1;
 			}
-		break; 
+			break; 
+		case OptSetFreq:
+			freq = strtod(optarg, NULL);
+			break;
 		case OptHelp:
+			pcimax_usage_common();
+			return 1;
+			break;
 		case ':':
 			fprintf(stderr, "Option '%s' requires a value\n",
 				argv[optind]);
@@ -247,20 +306,7 @@ int main(int argc, char* argv[])
 	fd = pcimax_open_serial(device);
 	pcimax_setup_serial(fd);
 
-	/* TODO: send the user specified options to the device 
-	 * Right now only tries to change the frequency */
-	/* setting stereo mode */
-	//printf("Bytes written: %d\n",write(fd,"abeede",6));
-	pcimax_send_command(fd, "FS", "1", 1);
-	/* setting transmitter frequency */
-	const char *freq = pcimax_get_freq(102000);
-	pcimax_send_command(fd, "FF", freq, 2);
-	/* setting output power */
-	const char *pow = pcimax_get_power(80);
-	pcimax_send_command(fd, "FO", pow, 0);
-	/* store the settings, commit changes */
-	str_buf[0]= '0';
-	pcimax_send_command(fd, "FW", &str_buf[0], 1);
+	pcimax_set_freq(fd, freq);
 
 	/* restore settings & close the program  */
 	pcimax_exit(fd, true);
