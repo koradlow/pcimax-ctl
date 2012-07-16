@@ -43,6 +43,8 @@
 #define PCIMAX_PI	0x200
 #define PCIMAX_PTY	0x400
 #define PCIMAX_PTYT	0x800
+#define PCIMAX_TP	0x1000
+#define PCIMAX_TA	0x2000
 
 static struct termios old_settings;
 
@@ -53,6 +55,10 @@ enum Options{
 	OptHelp = 'h',
 	OptSetStereo = 64,
 	OptSetPower,
+	OptSetPI,
+	OptSetPTY,
+	OptSetTA,
+	OptSetTP,
 	OptLast = 128
 };
 
@@ -62,6 +68,10 @@ static struct option long_options[] = {
 	{"set-freq", required_argument, 0, OptSetFreq},
 	{"set-stereo", required_argument, 0, OptSetStereo},
 	{"set-power", required_argument, 0, OptSetPower},
+	{"set-tp", required_argument, 0, OptSetTP},
+	{"set-ta", required_argument, 0 , OptSetTA},
+	{"set-pi", required_argument, 0 , OptSetPI},
+	{"set-pty", required_argument, 0, OptSetPTY},
 	{"help", no_argument, 0, OptHelp},
 	{0, 0, 0, 0}
 };
@@ -74,6 +84,11 @@ struct pcimax_settings {
 	uint32_t freq;	/* range 87500..108000 */
 	uint8_t power; 	/* range 0..100 */
 	char is_stereo; 
+	/** RDS settings **/
+	char pi[3];
+	char pty[2];
+	char tp;
+	char ta;
 };
 
 static char options[OptLast];
@@ -85,9 +100,9 @@ static void pcimax_usage_hint(void)
 	fprintf(stderr, "Try 'rds-ctl --help' for more information.\n");
 }
 
-static void pcimax_usage_common(void)
+static void pcimax_usage_fm(void)
 {
-	printf("\navailable options: \n"
+	printf("\nFM related options: \n"
 	       "  --device=<device>\n"
 	       "                     set the target device\n"
 	       "                     default: /dev/ttyUSB0\n"
@@ -101,6 +116,20 @@ static void pcimax_usage_common(void)
 	       "                     set the transmitter output power\n"
 	       "                     valid range: 0 .. 100\n"
 	       "                     !doesn't seem to have any effect\n"
+	       );
+}
+
+static void pcimax_usage_rds(void)
+{
+		printf("\nFM related options: \n"
+	       "  --set-pi=<pi code>\n"
+	       "                     set the Program Identification code\n"
+	       "  --set-pty=<pty code>\n"
+	       "                     set the Program Type Code\n"
+	       "  --set-tp=<true/false>\n"
+	       "                     set the Traffic Program flag\n"
+	       "  --set-ta=<true/false>\n"
+	       "                     set the Traffic Anouncement flag\n"
 	       );
 }
 
@@ -247,7 +276,7 @@ static const char* pcimax_get_power(uint8_t power)
 }
 
 /* TODO: do the power & stereo settings have any effect? 
- * -> submitting a value for "F0" command yields in no RDS transmission */
+ * -> submitting a value for "F0" command yields in no detectable transmission */
 /* Updates / Sets the FM Transmitter related settings
  * Frequency, Output Power and Stero/Mono mode */
 static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *settings)
@@ -269,11 +298,36 @@ static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *setting
 	pcimax_send_command(fd, "FW", "0", 1);
 }
 
+/* TODO: add Country code and AreaCoverage fields to settings, or calculate them
+ * from the given PI code */
+/* Updates / Sets RDS related settings */
+static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settings)
+{
+	/* enable RDS output */
+	pcimax_send_command(fd, "PWR", "1", 1);
+	/* setting PI code */
+	if (settings->defined & PCIMAX_PI) {
+		/* TODO: What is CCAC? */
+		pcimax_send_command(fd, "CCAC", "000", 3);
+		/* Program reference, lower byte of PI */
+		pcimax_send_command(fd, "PREF", "000", 3);
+	}
+	/* setting PTY code */
+	if (settings->defined & PCIMAX_PTY)
+		pcimax_send_command(fd, "PTY", settings->pty, 2); 
+	/* setting TP code */
+	if (settings->defined & PCIMAX_TP)
+		pcimax_send_command(fd, "TP", &settings->tp, 1);
+	/* setting TA code */
+	if (settings->defined & PCIMAX_TA)
+		pcimax_send_command(fd, "TA", &settings->ta, 1);
+}
+
 /* initializes the settings structure with sensefull default values */
 static void pcimax_init_settings(struct pcimax_settings* settings)
 {
 	static const char *default_device = "/dev/ttyUSB0";
-	
+
 	strcpy(settings->device, default_device);
 	settings->freq = 88700;
 	settings->power = 100;
@@ -340,8 +394,25 @@ int main(int argc, char* argv[])
 			i = strtol(optarg, 0L, 0);
 			settings.power = (i >= 0 && i <= 100)? i : 100;
 			break;
+		case OptSetPI:
+			settings.defined |= PCIMAX_PI | PCIMAX_RDS;
+			strcpy(settings.pi, optarg);
+			break;
+		case OptSetPTY:
+			settings.defined |= PCIMAX_PTY | PCIMAX_RDS;
+			strcpy(settings.pty, optarg);
+			break;
+		case OptSetTP:
+			settings.defined |= PCIMAX_TP | PCIMAX_RDS;
+			settings.tp = strcmp(optarg, "false")? '1' : '0';
+			break;
+		case OptSetTA:
+			settings.defined |= PCIMAX_TA | PCIMAX_RDS;
+			settings.ta = strcmp(optarg, "false")? '1' : '0';
+			break;
 		case OptHelp:
-			pcimax_usage_common();
+			pcimax_usage_fm();
+			pcimax_usage_rds();
 			return 1;
 			break;
 		case ':':
@@ -372,7 +443,8 @@ int main(int argc, char* argv[])
 	/* change all requested settings */
 	if (settings.defined & PCIMAX_FM)
 		pcimax_set_fm_settings(fd, &settings);
-	if (settings.defined & PCIMAX_RDS);
+	if (settings.defined & PCIMAX_RDS)
+		pcimax_set_rds_settings(fd, &settings);
 
 	/* restore settings & close the program  */
 	pcimax_exit(fd, true);
