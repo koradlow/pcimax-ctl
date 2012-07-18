@@ -55,7 +55,8 @@ enum Options{
 	OptSetDevice = 'd',
 	OptSetFreq = 'f',
 	OptHelp = 'h',
-	OptSetPower = 64,
+	OptSetMS = 64,
+	OptSetPower,
 	OptSetPI,
 	OptSetPS,
 	OptSetPTY,
@@ -70,6 +71,7 @@ enum Options{
 static struct option long_options[] = {
 	{"device", required_argument, 0, OptSetDevice},
 	{"set-freq", required_argument, 0, OptSetFreq},
+	{"set-ms", required_argument, 0, OptSetMS},
 	{"set-power", required_argument, 0, OptSetPower},
 	{"set-pi", required_argument, 0 , OptSetPI},
 	{"set-ps", required_argument, 0, OptSetPS},
@@ -131,7 +133,7 @@ static void pcimax_usage_fm(void)
 
 static void pcimax_usage_rds(void)
 {
-		printf("\nFM related options: \n"
+		printf("\nRDS related options: \n"
 	       "  --set-pi=<pi code>\n"
 	       "                     set the Program Identification code\n"
 	       "  --set-pty=<pty code>\n"
@@ -146,6 +148,8 @@ static void pcimax_usage_rds(void)
 	       "                     set the Traffic Program flag\n"
 	       "  --set-ta=<true/false>\n"
 	       "                     set the Traffic Anouncement flag\n"
+	       "  --set-ms=<music/speech>\n"
+	       "                     set the Music/Speech flag\n"
 	       
 	       );
 }
@@ -475,6 +479,20 @@ int main(int argc, char* argv[])
 			settings.defined |= PCIMAX_FREQ | PCIMAX_FM;
 			freq = strtod(optarg, NULL);
 			settings.freq = freq * 1000;
+			break;
+		case OptSetMS:
+			if (!strncmp(optarg, "music", 6)) {
+				settings.defined |= PCIMAX_RDS | PCIMAX_MS;
+				settings.ms = '1';
+			}
+			else if (!strncmp(optarg, "speech", 7)) {
+				settings.defined |= PCIMAX_RDS | PCIMAX_MS;
+				settings.ms = '0';
+			}
+			else {
+				printf("Unrecognized parameter for --set-ms: %s\n",optarg);
+				printf("Valid parameters: \"music\", \"speech\"\n");
+			}
 			break;
 		case OptSetStereo:
 			settings.defined |= PCIMAX_STEREO | PCIMAX_FM;
