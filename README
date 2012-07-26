@@ -23,5 +23,11 @@ latest version:
 you can always find the latest version of this tool in the git repo:
 https://github.com/koradlow/pcimax-ctl.github
 
+limitations:
+- the card only supports European country codes (ecc) {E0..E4}
+- the dynamic PS feature of the card is not supported because the RDS standard
+  explicitly states that the station name shouldn't be used dynamically
+- no support for setting alternative frequencies yet
+  
 contact:
 Konke Radlow <koradlow@gmail.com>
