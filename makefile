@@ -3,7 +3,7 @@ CC = gcc
 #Define the compiler options for this project
 CFLAGS += -Wall -O3 -std=gnu99
 #Define the libraries that are used for this project
-LDLIBS += 
+LDLIBS += -ludev
 
 #Define the output target
 TARGET = pcimax-ctl

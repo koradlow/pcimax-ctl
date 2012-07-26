@@ -2,7 +2,9 @@ pcimax-ctl
 ---------
 
 installation:
-this program has no special dependencies
+this program requires the libudev library (for auto device detection)
+Debian/Ubuntu: sudo apt-get install libudev0 libudev-dev
+
 default installation path is /usr/local/bin
 installation path can be changed by setting PREFIX variable
 (sudo make PREFIX=/opt install)
@@ -12,7 +14,7 @@ sudo make install
 sudo make uninstall
 
 development status:
-this program is still in an very early development stage. 
+this program is still in an early development stage. 
 Expect bugs and missing features and please report problems to
 https://github.com/koradlow/pcimax-ctl/issues
 
@@ -27,7 +29,7 @@ limitations:
 - the card only supports European country codes (ecc) {E0..E4}
 - the dynamic PS feature of the card is not supported because the RDS standard
   explicitly states that the station name shouldn't be used dynamically
-- no support for setting alternative frequencies yet
+- program doesn't support setting alternative frequencies yet
   
 contact:
 Konke Radlow <koradlow@gmail.com>

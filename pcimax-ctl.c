@@ -30,6 +30,7 @@
 #include <ctype.h>  /* Character classification routines */
 #include <getopt.h>
 #include <time.h>
+#include <libudev.h>
 
 /* define bits for bitmask that defines the settings that the user wants
  * to update */
@@ -120,7 +121,7 @@ static void pcimax_usage_fm(void)
 	printf("\nFM related options: \n"
 	       "  --device=<device>\n"
 	       "                     set the target device\n"
-	       "                     default: /dev/ttyUSB0\n"
+	       "                     default: auto-detect\n"
 	       "  --set-freq=<freq>\n"
 	       "                     set the frequency for the FM transmitter\n"
 	       "  --set-stereo=<true/false>\n"
@@ -150,7 +151,7 @@ static void pcimax_usage_rds(void)
 	       "                     set the Radio Text\n"
 	       "                     length is limited to 64 chars\n"
 	       "  --set-ecc=<ecc>\n"
-	       "                     set the Extendec country code\n"
+	       "                     set the Extended country code\n"
 	       "                     <ecc> 0..4 or e0..e5 or E0..E5\n"
 	       "  --set-tp=<true/false>\n"
 	       "                     set the Traffic Program flag\n"
@@ -160,6 +161,68 @@ static void pcimax_usage_rds(void)
 	       "                     set the Music/Speech flag\n"
 	       
 	       );
+}
+
+static const char* pcimax_find_device(void)
+{
+	struct udev *udev;
+	struct udev_enumerate *enumerate;
+	struct udev_list_entry *devices, *dev_list_entry;
+	struct udev_device *dev;
+	const char *id_product = "ea60";
+	const char *id_vendor = "10c4";
+	const char *path;
+	const char *product_buf;
+	const char *vendor_buf;
+	static char device[80];
+
+	/* create the udev object */
+	udev = udev_new();
+	if (!udev) {
+		fprintf(stderr, "Device auto-detection: Can't create udev\n");
+		exit(1);
+	}
+
+	/* create a list of all devices in the 'tty' subsystem */
+	enumerate = udev_enumerate_new(udev);
+	udev_enumerate_add_match_subsystem(enumerate, "tty");
+	udev_enumerate_scan_devices(enumerate);
+	devices = udev_enumerate_get_list_entry(enumerate);
+
+	/* check each item in the list, if it used the same USB to Serial
+	 * IC as the the pcimax3000+ card */
+	udev_list_entry_foreach(dev_list_entry, devices) {
+		/* get the filename of the /sys entry for the device
+		 * create a udev_device object (dev) representing it */
+		path = udev_list_entry_get_name(dev_list_entry);
+		dev = udev_device_new_from_syspath(udev, path);
+		/* store the device path in the /dev/ filesystem */
+		strncpy(device, udev_device_get_devnode(dev), 80); 
+		/* to get information about the device, get the parent device 
+		 * with the subsystem/devtype pair of "usb"/"usb_device" */
+		dev = udev_device_get_parent_with_subsystem_devtype(
+		       dev, "usb", "usb_device");
+		if (!dev) {
+			udev_device_unref(dev);
+			continue;
+		}
+
+		/* check if the tty device matches the USB to Serial 
+		 * converter that's used on the pcimax3000+ card */
+		product_buf = udev_device_get_sysattr_value(dev, "idProduct");
+		vendor_buf = udev_device_get_sysattr_value(dev, "idVendor");
+		if (strncmp(id_product, product_buf, 4) == 0 &&
+			strncmp(id_vendor, vendor_buf, 4) == 0) {
+			printf("Found pcimax3000+ card at %s\n", device);
+			break;
+		}
+		udev_device_unref(dev);
+	}
+	/* free the enumerator object */
+	udev_enumerate_unref(enumerate);
+
+	udev_unref(udev);
+	return device;
 }
 
 /* resores the terminal settings to the state they were before the program
@@ -314,7 +377,6 @@ static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *setting
 		pcimax_send_command(fd, "FS", &settings->is_stereo, 1);
 	/* setting transmitter frequency */
 	if (settings->defined & PCIMAX_FREQ) {
-		printf("Freq: %u\n", settings->freq);
 		const char *freq = pcimax_get_freq(settings->freq);
 		pcimax_send_command(fd, "FF", freq, 2);
 	}
@@ -436,7 +498,7 @@ static void pcimax_init_settings(struct pcimax_settings* settings)
 	settings->rt[64] = '\0';
 
 	/* FM-Settings */
-	strcpy(settings->device, "/dev/ttyUSB0");
+	strncpy(settings->device, pcimax_find_device(), 80);
 	settings->freq = 88700;
 	settings->power = 100;
 	settings->is_stereo = true; 
@@ -480,6 +542,7 @@ int main(int argc, char* argv[])
 		pcimax_usage_hint();
 		return 0;
 	}
+	
 	/* parse command line options */
 	for (i = 0; long_options[i].name; i++) {
 		if (!isalpha(long_options[i].val))
@@ -525,6 +588,7 @@ int main(int argc, char* argv[])
 				fprintf(stderr, "Unsupported ECC given: %c\n", optarg[0]);
 				return -1;
 			}
+			printf("ECC: %u, TP: %u\n", settings.ecc, settings.tp);
 			break;
 		case OptSetMS:
 			if (!strncmp(optarg, "music", 6)) {
