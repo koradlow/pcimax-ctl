@@ -51,6 +51,7 @@
 #define PCIMAX_MS	0x4000
 #define PCIMAX_PS	0x8000
 #define PCIMAX_ECC	0x10000
+#define PCIMAX_DI	0x20000
 
 static struct termios old_settings;
 
@@ -118,10 +119,14 @@ struct pcimax_settings {
 	char rt[65];		/* Null-terminated string */
 	char pty[3];		/* Null-terminated string */
 	char ps[9];		/* Null-terminated string */
-	char ecc;
-	char tp;
-	char ta;
-	char ms;
+	char ecc;		/* Extended country code */
+	char tp;		/* Traffic Program flag */
+	char ta;		/* Traffic Announcement flag */
+	char ms;		/* music / speech flag */
+	/* decoder information fields */
+	char di_artificial; 	/* artificial head */
+	char di_compression;	/* compressed transmission flag */
+	char di_dynamic_pty;	/* dynamic program type */
 };
 
 static void pcimax_set_settings(int fd, const struct termios *settings);
@@ -500,11 +505,17 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 		pcimax_send_command(fd, "MS", &settings->ms, 1);
 	}
 	/* setting DI code (Decode Information) */
-	pcimax_send_command(fd, "Did0", "1", 1); /* mono / stereo */
-	pcimax_send_command(fd, "Did1", "1", 1); /* artificial head */
-	pcimax_send_command(fd, "Did2", "1", 1); /* compression */
-	pcimax_send_command(fd, "Did3", "1", 1); /* dynamic PTY */
-
+	if (settings->defined & PCIMAX_DI) {
+		printf("Setting RDS Decoder Information flags\n");
+		printf("  --> mode: %s, artificial head: %c, \n  --> compression: %c, dynamic PTY: %c\n",
+			(settings->is_stereo)? "stereo" : "mono", settings->di_artificial,
+			settings->di_compression, settings->di_dynamic_pty);
+		/* use the FM-Transmitter setting for mono/stereo flag */
+		pcimax_send_command(fd, "Did0", "1", settings->is_stereo);
+		pcimax_send_command(fd, "Did1", "1", settings->di_artificial); /* artificial head */
+		pcimax_send_command(fd, "Did2", "1", settings->di_compression); /* compression */
+		pcimax_send_command(fd, "Did3", "1", settings->di_dynamic_pty); /* dynamic PTY */
+	}
 	/* setting AF codes alternative frequencies */
 	/* n AF + magic number + offset = number of defined AFs 
 	 * maximal AFs = 7 */
@@ -682,6 +693,15 @@ int pcimax_ini_cb(void* buffer, const char* section, const char* name, const cha
 		settings->ms = strcmp(value, "false")? '1' : '0';
 	} else if (MATCH("RDS", "af")) {
 		pcimax_parse_af(settings, value);
+	} else if (MATCH("RDS", "di_artificial")) {
+		settings->defined |= PCIMAX_DI | PCIMAX_RDS;
+		settings->di_artificial = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("RDS", "di_compression")) {
+		settings->defined |= PCIMAX_DI | PCIMAX_RDS;
+		settings->di_compression = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("RDS", "di_dynamic_pty")) {
+		settings->defined |= PCIMAX_DI | PCIMAX_RDS;
+		settings->di_dynamic_pty = strcmp(value, "false")? '1' : '0';
 	}
 
 	return 0;
