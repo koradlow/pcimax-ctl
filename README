@@ -9,13 +9,17 @@ default installation path is /usr/local/bin
 installation path can be changed by setting PREFIX variable
 (sudo make PREFIX=/opt install)
 
+cd ~
+git clone http://github.com/koradlow/pcimax-ctl && cd pcimax-ctl
 make
 sudo make install
-sudo make uninstall
+#sudo make uninstall
 
 development status:
-this program is still in an early development stage. 
-Expect bugs and missing features and please report problems to
+this program is still under development, but it offers the same feature
+set as the official windows program with the exception of dynamic 
+Program Station names (see limitations).
+If you find a bug or run into other problems please report to
 https://github.com/koradlow/pcimax-ctl/issues
 
 licence: 
@@ -23,13 +27,26 @@ all code is released under the GNU General Public License version 2 (GPLv2)
 
 latest version:
 you can always find the latest version of this tool in the git repo:
-https://github.com/koradlow/pcimax-ctl.github
+https://github.com/koradlow/pcimax-ctl
 
 limitations:
 - the card only supports European country codes (ecc) {E0..E4}
 - the dynamic PS feature of the card is not supported because the RDS standard
   explicitly states that the station name shouldn't be used dynamically
-- program doesn't support setting alternative frequencies yet
-  
+
+usage:
+pcimax-ctl --help
+will display a summary and explanation of the available options
+
+pcimax-ctl --file=/home/user/pcimax_ctl/config.ini
+most users will probaly want to use a configuration file for setting the
+options. An example for a config file can be found in the sourcecode folder
+that was created during installation. 
+
+pcimax-ctl --file=/home/user/pcimax_ctl/config.ini --monitor
+it can be very handy to keep the program running in the background and have
+it updating the settings whenever the config file is modfied.
+
+
 contact:
 Konke Radlow <koradlow@gmail.com>
