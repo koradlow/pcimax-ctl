@@ -9,21 +9,26 @@ LDLIBS += -ludev
 TARGET = pcimax-ctl
 
 #All source packages
-SOURCES = pcimax-ctl.c
+SOURCES = ./include/inih/ini.c ./pcimax-ctl.c
+VPATH := ./include/inih
 
 #Define all object files
-OBJ = $(SOURCES:.c=.o)
+#(remove path information from source files)
+COMMON_OBJS := $(patsubst %.c, %.o, $(notdir $(SOURCES)))
+
+#Build all object files
+%.o : %.c $(SOURCES)
+	@echo creating "$@" ...
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(TARGET): $(COMMON_OBJS)
+	@echo building target binary "$(TARGET)" ...
+	$(CC) -o $(TARGET) $(COMMON_OBJS) $(LDLIBS)
 
 all: $(TARGET)
 
-$(TARGET): $(OBJ)
-	$(CC) -o $@ $^ $(CFLAGS) $(LDLIBS)
-
-%.o: %.c $(SOURCES)
-	$(CC) -c -o $@ $< $(CFLAGS)
-
 clean:
-	rm -f $(OBJ)
+	rm -f $(COMMON_OBJS)
 
 PREFIX:= /usr/local
 

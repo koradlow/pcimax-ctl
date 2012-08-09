@@ -22,15 +22,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/ioctl.h>
-#include <string.h>  /* String function definitions */
-#include <unistd.h>  /* UNIX standard function definitions */
-#include <fcntl.h>   /* File control definitions */
-#include <errno.h>   /* Error number definitions */
-#include <termios.h> /* POSIX terminal control definitions */
-#include <ctype.h>  /* Character classification routines */
+#include <string.h>	/* String function definitions */
+#include <unistd.h>	/* UNIX standard function definitions */
+#include <fcntl.h>	/* File control definitions */
+#include <errno.h>	/* Error number definitions */
+#include <termios.h>	/* POSIX terminal control definitions */
+#include <ctype.h>	/* Character classification routines */
 #include <getopt.h>
 #include <time.h>
 #include <libudev.h>
+
+#include "include/inih/ini.h"	/* ini file parsing lib */
 
 /* define bits for bitmask that defines the settings that the user wants
  * to update */
@@ -57,7 +59,9 @@ enum Options{
 	OptSetDevice = 'd',
 	OptSetFreq = 'f',
 	OptHelp = 'h',
-	OptSetECC = 64,
+	OptMonitor = 'm',
+	OptFile = 64,
+	OptSetECC,
 	OptSetMS,
 	OptSetPower,
 	OptSetPI,
@@ -73,6 +77,9 @@ enum Options{
 /* long options */
 static struct option long_options[] = {
 	{"device", required_argument, 0, OptSetDevice},
+	{"file", required_argument, 0, OptFile},
+	{"help", no_argument, 0, OptHelp},
+	{"monitor", no_argument, 0, OptMonitor},
 	{"set-ecc", required_argument, 0, OptSetECC},
 	{"set-freq", required_argument, 0, OptSetFreq},
 	{"set-ms", required_argument, 0, OptSetMS},
@@ -84,36 +91,51 @@ static struct option long_options[] = {
 	{"set-stereo", required_argument, 0, OptSetStereo},
 	{"set-ta", required_argument, 0 , OptSetTA},
 	{"set-tp", required_argument, 0, OptSetTP},
-	{"help", no_argument, 0, OptHelp},
 	{0, 0, 0, 0}
 };
 
 /* struct containing all available settings for the device */
 struct pcimax_settings {
-	uint32_t defined;
-	char device[80];
+	/** General settings **/
+	uint32_t defined;	/* bitmask denoting all defined settings */
+	char options[OptLast];	/* array with 1 field (true/false) for each option */
+	char device[80];	/* path of the virtual com port of pcimax3000+ */
+	char file[80];		/* path of the config file */
+	bool monitor;		/* monitor config file for changes */
+	
 	/** FM-Transmitter settings **/
 	uint32_t freq;	/* range 87500..108000 */
 	uint8_t power; 	/* range 0..100 */
 	char is_stereo; 
+	
 	/** RDS settings **/
+	/* fields are stored as chars to ease transmission over serial line */
 	uint8_t pi[2];
-	char rt[65];
-	char pty[2];
-	char ps[9];
+	char rt[65];	/* Null-terminated string */
+	char pty[3];	/* Null-terminated string */
+	char ps[9];	/* Null-terminated string */
 	char ecc;
 	char tp;
 	char ta;
 	char ms;
 };
 
-static char options[OptLast];
-
 static void pcimax_set_settings(int fd, const struct termios *settings);
 
 static void pcimax_usage_hint(void)
 {
 	fprintf(stderr, "Try 'rds-ctl --help' for more information.\n");
+}
+
+static void pcimax_usage(void)
+{
+	printf("\n General options: \n"
+	       "  --file=<path>\n"
+	       "                     load values from config file instead of cl\n"
+	       "  -m, --monitor\n"
+	       "                     monitor config file for changes and auto\n"
+	       "                     update values when changes are detected\n"
+	       );
 }
 
 static void pcimax_usage_fm(void)
@@ -152,17 +174,20 @@ static void pcimax_usage_rds(void)
 	       "                     length is limited to 64 chars\n"
 	       "  --set-ecc=<ecc>\n"
 	       "                     set the Extended country code\n"
-	       "                     <ecc> 0..4 or e0..e5 or E0..E5\n"
+	       "                     <ecc> 0..4 or e0..e4 or E0..E4\n"
 	       "  --set-tp=<true/false>\n"
 	       "                     set the Traffic Program flag\n"
 	       "  --set-ta=<true/false>\n"
 	       "                     set the Traffic Anouncement flag\n"
-	       "  --set-ms=<music/speech>\n"
+	       "  --set-ms=<true/false>\n"
 	       "                     set the Music/Speech flag\n"
-	       
+	       "                     <true> -> music, <false> -> speech\n"
 	       );
 }
 
+/* try to auto-detect connected pcimax3000+ devices, by comparing the Vendor
+ * and Product ID for the USB-to-Serial IC to all tty devices of the system
+ * code inspired by: http://www.signal11.us/oss/udev/ */
 static const char* pcimax_find_device(void)
 {
 	struct udev *udev;
@@ -175,6 +200,7 @@ static const char* pcimax_find_device(void)
 	const char *product_buf;
 	const char *vendor_buf;
 	static char device[80];
+	bool device_found = false;
 
 	/* create the udev object */
 	udev = udev_new();
@@ -214,14 +240,21 @@ static const char* pcimax_find_device(void)
 		if (strncmp(id_product, product_buf, 4) == 0 &&
 			strncmp(id_vendor, vendor_buf, 4) == 0) {
 			printf("Found pcimax3000+ card at %s\n", device);
+			device_found = true;
 			break;
 		}
 		udev_device_unref(dev);
 	}
 	/* free the enumerator object */
 	udev_enumerate_unref(enumerate);
-
 	udev_unref(udev);
+
+	/* end the program if no card could be detected */
+	if (!device_found) {
+		fprintf(stderr, "No pcimax3000+ card detected, exiting now\n");
+		exit(1);
+	}
+
 	return device;
 }
 
@@ -262,6 +295,7 @@ static void pcimax_set_settings(int fd, const struct termios *settings)
 /* place the terminal 'fd' into PCIMAX3000+ compatible mode
  * @fd:		file descriptor for a terminal device
  * @ret_val:	0 on success, -1 on error */
+/* TODO: figure out the minimal set of settings for proper communication */ 
 static void pcimax_setup_serial(int fd)
 {
 	struct termios new_settings;
@@ -373,15 +407,20 @@ static const char* pcimax_get_power(uint8_t power)
 static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *settings)
 {
 	/* setting stereo / mono mode */
-	if (settings->defined & PCIMAX_STEREO)
+	if (settings->defined & PCIMAX_STEREO) {
+		printf("Setting transmitter to %s mode\n", 
+			(settings->is_stereo) ? "stereo" : "mono");
 		pcimax_send_command(fd, "FS", &settings->is_stereo, 1);
+	}
 	/* setting transmitter frequency */
 	if (settings->defined & PCIMAX_FREQ) {
+		printf("Setting transmitter to %.1fMHz\n", (settings->freq / 1000.0f));
 		const char *freq = pcimax_get_freq(settings->freq);
 		pcimax_send_command(fd, "FF", freq, 2);
 	}
 	/* setting output power */
 	if (settings->defined & PCIMAX_PWR) {
+		printf("Setting transmitter power to %d%%\n", settings->power);
 		const char *pow = pcimax_get_power(settings->power);
 		pcimax_send_command(fd, "FO", pow, 1);
 	}
@@ -405,6 +444,7 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 
 	/* setting PI code 
 	 * RDS-Standard for short range transmitters: 
+	 * (see IEC62106: Annex D table D.5)
 	 * bits 0-7: Program reference number
 	 * bits 8-11: Program in terms of area coverage
 	 * 	1 (hex) when device uses an AF list
@@ -413,6 +453,8 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 	 * atm the program will not enforce these values but let the user
 	 * select the PI code freely (might be changed) */
 	if (settings->defined & PCIMAX_PI) {
+		printf("Setting RDS PI to 0x%02x%02x\n", settings->pi[0], 
+			settings->pi[1]);
 		/* low byte of PI */
 		sprintf(buffer, "%03u", settings->pi[1]);
 		pcimax_send_command(fd, "CCAC", buffer, 3);
@@ -421,18 +463,25 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 		pcimax_send_command(fd, "PREF", buffer, 3);
 	}
 	/* setting PTY code */
-	if (settings->defined & PCIMAX_PTY)
+	if (settings->defined & PCIMAX_PTY) {
+		printf("Setting RDS PTY to %s\n", settings->pty);
 		pcimax_send_command(fd, "PTY", settings->pty, 2); 
+	}
 	/* setting TP code */
-	if (settings->defined & PCIMAX_TP)
+	if (settings->defined & PCIMAX_TP) {
+		printf("Setting RDS TP flag to %s\n", (settings->tp) ? "true" : "false");
 		pcimax_send_command(fd, "TP", &settings->tp, 1);
+	}
 	/* setting TA code */
-	if (settings->defined & PCIMAX_TA)
+	if (settings->defined & PCIMAX_TA) {
+		printf("Setting RDS TA flag to %s\n", (settings->ta) ? "true" : "false");
 		pcimax_send_command(fd, "TA", &settings->ta, 1);
+	}
 	/* setting MS code */
-	if (settings->defined & PCIMAX_MS)
+	if (settings->defined & PCIMAX_MS) {
+		printf("Setting RDS m/s flag to %s\n", (settings->ms) ? "music" : "speech");
 		pcimax_send_command(fd, "MS", &settings->ms, 1);
-
+	}
 	/* setting DI code (Decode Information) */
 	pcimax_send_command(fd, "Did0", "1", 1); /* mono / stereo */
 	pcimax_send_command(fd, "Did1", "1", 1); /* artificial head */
@@ -451,27 +500,32 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 
 	/* setting ECC code (country code, value range 1..5 + offset) */
 	buffer[0] = settings->ecc + offset;
-	if (settings->defined & PCIMAX_ECC)
+	if (settings->defined & PCIMAX_ECC) {
+		printf("Setting RDS ECC code to E%u\n", settings->ecc - 1);
 		pcimax_send_command(fd, "ECC", buffer, 1);
-
+	}
 	/* setting the RT */
-	/* TODO: 
-	 * a) Find out if there's a way to flush the rt buffer of the device
-	 * right now values are only overwritten but if the new RT is shorter
-	 * than the old one, parts of the old RT will still be visible 
-	 * b) find out if there's a way to toggle the RDS A/B flag, to signal
-	 * the receiver that a new RT will be transmitted */
-	if (settings->defined & PCIMAX_RT) { 
+	/* a) when setting a new RT the old value is not flushed but over-
+	 * written. If the new RT is shorter than the old one, parts of
+	 * the old RT will still be transmitted. To solve this problem the
+	 * buffer is filled with space characters before setting the new RT 
+	 * b) RDS standard features an RDS RT a/b flag to notify the receiver
+	 * the receiver that new RT will be transmitted. Pcimax3000+ does not
+	 * support this */
+	if (settings->defined & PCIMAX_RT) {
+		printf("Setting RDS RT to: %s\n", settings->rt); 
 		/* overwrite the old RT with space characters */
 		memset(buffer, 0x20, 64);
 		pcimax_send_command(fd, "RT", buffer, 64);
 		pcimax_send_command(fd, "RT", settings->rt, strlen(settings->rt));
 	}
 	/* setting PS name */
-	/* TODO: right now only static station naming is supported, as the
-	 * the RDS standard specifically specifies that the PS feature shouldn't
+	/* Even though pcimax3000+ features dynamic station names this
+	 * program only supports static station naming, as the the RDS
+	 * standard specifically states that the PS feature shouldn't
 	 * be used dynamically */
 	if (settings->defined & PCIMAX_PS) {
+		printf("Setting RDS PS to: %s\n", settings->ps);
 		/* overwrite the old PS with space characters */
 		memset(buffer, 0x20, 64);
 		pcimax_send_command(fd, "PS00", buffer, 8);
@@ -490,12 +544,11 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 	}
 }
 
-/* initializes the settings structure with sensefull default values */
+/* initializes the settings structure with sensible default values */
 static void pcimax_init_settings(struct pcimax_settings* settings)
 {
-	/* delimit char arrays for safety reasons (prevent overflows) */
-	settings->ps[8] = '\0';
-	settings->rt[64] = '\0';
+	/* initialize all fields to 0 */
+	memset(settings, 0, sizeof(*settings));
 
 	/* FM-Settings */
 	strncpy(settings->device, pcimax_find_device(), 80);
@@ -526,23 +579,99 @@ void pcimax_replace_terminating_null(char *string, char replacement, uint32_t le
 	}
 }
 
-int main(int argc, char* argv[])
+void parse_ecc(struct pcimax_settings *settings, const char *value)
 {
-	int fd = -1;
+	settings->defined |= PCIMAX_RDS | PCIMAX_ECC;
+	if (value[0] == 'e' || value[0] == 'E')
+		value++;
+	if (value[0] >= '0' && value[0] <= '4')
+		/* the card expects values from 1 to 5, but the codes 
+		 * are specified as E0..E4 --> add +1 */
+		settings->ecc = (char)strtol(value, NULL, 10) + 1;
+	else {
+		fprintf(stderr, "Unsupported ECC given: %c\n", value[0]);
+		exit(1);
+	}
+}
+
+void parse_pi(struct pcimax_settings *settings, const char *value)
+{
+	int tmp = 0;
+	
+	settings->defined |= PCIMAX_PI | PCIMAX_RDS;
+	if (value[0] == '0' && value[1] == 'x')
+		tmp = strtol(value, NULL, 16);
+	else
+		tmp = strtol(value, NULL, 10);
+	settings->pi[1] = (uint8_t) tmp & 0Xff;
+	settings->pi[0] = (uint8_t) (tmp >> 8) & 0x0ff;
+}
+
+/* callback function for the ini file parsing library */
+int ini_cb(void* buffer, const char* section, const char* name, const char* value)
+{
+	struct pcimax_settings *settings = (struct pcimax_settings*) buffer;
+	int i;
+	
+	#define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
+	/* FM Settings */
+	if (MATCH("FM", "freq")) {
+		settings->defined |= PCIMAX_FREQ | PCIMAX_FM;
+		settings->freq = strtod(value, NULL) * 1000;
+	} else if (MATCH("FM", "stereo")) {
+		settings->defined |= PCIMAX_STEREO | PCIMAX_FM;
+		settings->is_stereo = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("FM", "power")) {
+		settings->defined |= PCIMAX_PWR | PCIMAX_FM;
+		i = strtol(value, 0L, 0);
+		settings->power = (i >= 0 && i <= 100)? i : 100;
+	} 
+	
+	/* RDS Settings */
+	if (MATCH("RDS", "pi")) {
+		parse_pi(settings, value);
+	} else if (MATCH("RDS", "pty")) {
+		settings->defined |= PCIMAX_PTY | PCIMAX_RDS;
+		strncpy(settings->pty, value, 2);
+	} else if (MATCH("RDS", "ps")) {
+		settings->defined |= PCIMAX_PS | PCIMAX_RDS;
+		strncpy(settings->ps, value, 8);
+	} else if (MATCH("RDS", "rt")) {
+		settings->defined |= PCIMAX_RT | PCIMAX_RDS;
+		strncpy(settings->rt, value, 64);
+	} else if (MATCH("RDS", "ecc")) {
+		parse_ecc(settings, value);
+	} else if (MATCH("RDS", "tp")) {
+		settings->defined |= PCIMAX_TP | PCIMAX_RDS;
+		settings->tp = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("RDS", "ta")) {
+		settings->defined |= PCIMAX_TA | PCIMAX_RDS;
+		settings->ta = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("RDS", "ms")) {
+		settings->defined |= PCIMAX_MS | PCIMAX_RDS;
+		settings->ms = strcmp(value, "false")? '1' : '0';
+	}
+
+	return 0;
+}
+
+/* parse the command line into the settings struct */
+uint32_t pcimax_parse_cl(int argc, char **argv,
+			struct pcimax_settings *settings)
+{
 	int i = 0;
 	int idx = 0;
 	int ch = 0;
-	int tmp;
 	double freq;
-	char short_options[26 * 2 * 2 + 1]; 	/*TODO: don't use magic number */
-	static struct pcimax_settings settings;
-	
-	pcimax_init_settings(&settings);
+	/* 26 letters in the alphabet, case sensitive = 26 * 2 possible
+	 * short options, where each option requires at most two chars
+	 * {option, optional argument} */
+	char short_options[26 * 2 * 2 + 1];
+
 	if (argc == 1) {
 		pcimax_usage_hint();
-		return 0;
+		exit(1);
 	}
-	
 	/* parse command line options */
 	for (i = 0; long_options[i].name; i++) {
 		if (!isalpha(long_options[i].val))
@@ -551,6 +680,7 @@ int main(int argc, char* argv[])
 		if (long_options[i].has_arg == required_argument)
 			short_options[idx++] = ':';
 	}
+
 	while(1){
 		int option_index = 0;
 
@@ -560,102 +690,85 @@ int main(int argc, char* argv[])
 		if (ch == -1)
 			break;
 
-		options[(int)ch] = 1;
+		settings->options[(int)ch] = 1;
 		switch (ch){
-		case OptSetDevice:
-			memset(settings.device, 0, 80);
+		case OptFile:
 			if (access(optarg, F_OK) != -1)
-				strncpy(settings.device, optarg, 80);
+				strncpy(settings->file, optarg, 80);
+			else {
+				fprintf(stderr, "Unable to open ini file: %s\n", optarg);
+				exit(1);
+			}
+			break;
+		case OptSetDevice:
+			memset(settings->device, 0, 80);
+			if (access(optarg, F_OK) != -1)
+				strncpy(settings->device, optarg, 80);
 			else {
 				fprintf(stderr, "Unable to open device: %s\n", optarg);
-				return -1;
+				exit(1);
 			}
 			break; 
 		case OptSetFreq:
-			settings.defined |= PCIMAX_FREQ | PCIMAX_FM;
+			settings->defined |= PCIMAX_FREQ | PCIMAX_FM;
 			freq = strtod(optarg, NULL);
-			settings.freq = freq * 1000;
+			settings->freq = freq * 1000;
 			break;
 		case OptSetECC:
-			settings.defined |= PCIMAX_RDS | PCIMAX_ECC;
-			if (optarg[0] == 'e' || optarg[0] == 'E')
-				optarg++;
-			if (optarg[0] >= '0' && optarg[0] <= '4')
-				/* the card expects values from 1 to 5, but the codes 
-				 * are specified as E0..E4 --> add +1 */
-				settings.ecc = (char)strtol(optarg, NULL, 10) + 1;
-			else {
-				fprintf(stderr, "Unsupported ECC given: %c\n", optarg[0]);
-				return -1;
-			}
-			printf("ECC: %u, TP: %u\n", settings.ecc, settings.tp);
-			break;
-		case OptSetMS:
-			if (!strncmp(optarg, "music", 6)) {
-				settings.defined |= PCIMAX_RDS | PCIMAX_MS;
-				settings.ms = '1';
-			} else if (!strncmp(optarg, "speech", 7)) {
-				settings.defined |= PCIMAX_RDS | PCIMAX_MS;
-				settings.ms = '0';
-			} else {
-				printf("Unrecognized parameter for --set-ms: %s\n",optarg);
-				printf("Valid parameters: \"music\", \"speech\"\n");
-			}
+			parse_ecc(settings, optarg);
 			break;
 		case OptSetStereo:
-			settings.defined |= PCIMAX_STEREO | PCIMAX_FM;
-			settings.is_stereo = strcmp(optarg, "false")? '1' : '0';
+			settings->defined |= PCIMAX_STEREO | PCIMAX_FM;
+			settings->is_stereo = strcmp(optarg, "false")? '1' : '0';
 			break;
 		case OptSetPower:
-			settings.defined |= PCIMAX_PWR | PCIMAX_FM;
+			settings->defined |= PCIMAX_PWR | PCIMAX_FM;
 			i = strtol(optarg, 0L, 0);
-			settings.power = (i >= 0 && i <= 100)? i : 100;
+			settings->power = (i >= 0 && i <= 100)? i : 100;
 			break;
 		case OptSetPI:
-			settings.defined |= PCIMAX_PI | PCIMAX_RDS;
-			if (optarg[0] == '0' && optarg[1] == 'x')
-				tmp = strtol(optarg, NULL, 16);
-			else
-				tmp = strtol(optarg, NULL, 10);
-			settings.pi[1] = (uint8_t) tmp & 0Xff;
-			settings.pi[0] = (uint8_t) (tmp >> 8) & 0x0ff;
-			printf("pi low: %03u, pi high: %03u\n", settings.pi[0], settings.pi[1]);
+			parse_pi(settings, optarg);
 			break;
 		case OptSetPTY:
-			settings.defined |= PCIMAX_PTY | PCIMAX_RDS;
-			strncpy(settings.pty, optarg, 2);
+			settings->defined |= PCIMAX_PTY | PCIMAX_RDS;
+			strncpy(settings->pty, optarg, 2);
 			break;
 		case OptSetPS:
-			settings.defined |= PCIMAX_PS | PCIMAX_RDS;
-			strncpy(settings.ps, optarg, 8);
+			settings->defined |= PCIMAX_PS | PCIMAX_RDS;
+			strncpy(settings->ps, optarg, 8);
 			break;
 		case OptSetRT:
-			settings.defined |= PCIMAX_RT | PCIMAX_RDS;
-			strncpy(settings.rt, optarg, 64);
+			settings->defined |= PCIMAX_RT | PCIMAX_RDS;
+			strncpy(settings->rt, optarg, 64);
 			break;
 		case OptSetTP:
-			settings.defined |= PCIMAX_TP | PCIMAX_RDS;
-			settings.tp = strcmp(optarg, "false")? '1' : '0';
+			settings->defined |= PCIMAX_TP | PCIMAX_RDS;
+			settings->tp = strcmp(optarg, "false")? '1' : '0';
 			break;
 		case OptSetTA:
-			settings.defined |= PCIMAX_TA | PCIMAX_RDS;
-			settings.ta = strcmp(optarg, "false")? '1' : '0';
+			settings->defined |= PCIMAX_TA | PCIMAX_RDS;
+			settings->ta = strcmp(optarg, "false")? '1' : '0';
+			break;
+		case OptSetMS:
+			settings->defined |= PCIMAX_MS | PCIMAX_RDS;
+			settings->ms = strcmp(optarg, "false")? '1' : '0';
 			break;
 		case OptHelp:
+			pcimax_usage();
 			pcimax_usage_fm();
 			pcimax_usage_rds();
-			return 1;
+			exit(1);
 			break;
 		case ':':
 			fprintf(stderr, "Option '%s' requires a value\n",
 				argv[optind]);
 			pcimax_usage_hint();
-			return 1;
+			exit(1);
 		case '?':
 			if (argv[optind])
 				fprintf(stderr, "Unknown argument '%s'\n", argv[optind]);
 			pcimax_usage_hint();
-			return 1;
+			exit(1);
 		}
 	}
 	if (optind < argc) {
@@ -667,17 +780,40 @@ int main(int argc, char* argv[])
 		return 1;
 	}
 
+	return 0;
+}
+
+int main(int argc, char* argv[])
+{
+	int fd = -1;
+	static struct pcimax_settings settings;
+	memset(&settings, 0, sizeof(settings));
+	
+	/* set up the program settings */
+	//pcimax_init_settings(&settings);
+	pcimax_parse_cl(argc, argv, &settings);
+
+	/* if a ini file was specified, load the values from the file */
+	if (settings.options[OptFile]) {
+		ini_parse(settings.file, ini_cb, &settings);
+	}
+
+	/* if no device was specified, try to auto-detect the card */
+	if (!settings.options[OptSetDevice]) {
+		strncpy(settings.device, pcimax_find_device(), 80);
+	}
+
 	/* open the device(com port) and configure it */
 	fd = pcimax_open_serial(settings.device);
 	pcimax_setup_serial(fd);
 
-	/* change all requested settings */
+	/* update all defined RDS values */
 	if (settings.defined & PCIMAX_FM)
 		pcimax_set_fm_settings(fd, &settings);
 	if (settings.defined & PCIMAX_RDS)
 		pcimax_set_rds_settings(fd, &settings);
 
-	/* restore settings & close the program  */
+	/* restore com port settings & close the program  */
 	pcimax_exit(fd, true);
 	return 1;
 };
