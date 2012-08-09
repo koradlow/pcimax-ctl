@@ -61,6 +61,7 @@ enum Options{
 	OptHelp = 'h',
 	OptMonitor = 'm',
 	OptFile = 64,
+	OptSetAF,
 	OptSetECC,
 	OptSetMS,
 	OptSetPower,
@@ -80,6 +81,7 @@ static struct option long_options[] = {
 	{"file", required_argument, 0, OptFile},
 	{"help", no_argument, 0, OptHelp},
 	{"monitor", no_argument, 0, OptMonitor},
+	{"set-af", required_argument, 0, OptSetAF},
 	{"set-ecc", required_argument, 0, OptSetECC},
 	{"set-freq", required_argument, 0, OptSetFreq},
 	{"set-ms", required_argument, 0, OptSetMS},
@@ -111,9 +113,11 @@ struct pcimax_settings {
 	/** RDS settings **/
 	/* fields are stored as chars to ease transmission over serial line */
 	uint8_t pi[2];
-	char rt[65];	/* Null-terminated string */
-	char pty[3];	/* Null-terminated string */
-	char ps[9];	/* Null-terminated string */
+	uint32_t af[7];		/* Alternative Frequencies, range 87500..10800 */ 
+	uint8_t af_size;	/* number of defined AFs */
+	char rt[65];		/* Null-terminated string */
+	char pty[3];		/* Null-terminated string */
+	char ps[9];		/* Null-terminated string */
 	char ecc;
 	char tp;
 	char ta;
@@ -175,6 +179,10 @@ static void pcimax_usage_rds(void)
 	       "  --set-ecc=<ecc>\n"
 	       "                     set the Extended country code\n"
 	       "                     <ecc> 0..4 or e0..e4 or E0..E4\n"
+	       "  --set-af=<af list>\n"
+	       "                     set the alternative frequencies for the station\n"
+	       "                     <af list>: e.g. 88.9,101.2\n"
+	       "                     max size of af list: 6\n"
 	       "  --set-tp=<true/false>\n"
 	       "                     set the Traffic Program flag\n"
 	       "  --set-ta=<true/false>\n"
@@ -428,6 +436,15 @@ static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *setting
 	pcimax_send_command(fd, "FW", "0", 1);
 }
 
+/* pcimax3000+ protocol expects a trans-coded alternative frequency 
+ * representation. The lowest possible frequency 87.6MHz maps to 1, and
+ * the frequency is increased  by 0.1MHz per step, so that the
+ * highest possible frequency 108MHz maps to 205 */ 
+static char pcimax_get_af_code(uint32_t freq)
+{
+	return (freq - 87500) / 100;
+}
+
 /* TODO: add Country code and AreaCoverage fields to settings, or calculate them
  * from the given PI code */
 /* Updates / Sets RDS related settings */
@@ -489,13 +506,23 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 	pcimax_send_command(fd, "Did3", "1", 1); /* dynamic PTY */
 
 	/* setting AF codes alternative frequencies */
-	/* 0 AF + magic number + offset = number of defined AFs */
-	buffer[0] = 0 + 224 + offset;
+	/* n AF + magic number + offset = number of defined AFs 
+	 * maximal AFs = 7 */
+	buffer[0] = settings->af_size + 224 + offset;
 	pcimax_send_command(fd, "AF0", buffer, 1);  /* number of defined AFs */
 	for (uint8_t i = 1; i <= 7;  i++) {
-		/* set all 6 AFs to 0 */
+		char af;
+		/* set all defined AFs to the desired frequency and the
+		 * rest to 0 */
 		sprintf(buffer, "AF%u", i);
-		pcimax_send_command(fd, buffer, "0", 1);
+		if (i > settings->af_size) {
+			pcimax_send_command(fd, buffer, "0", 1);
+			continue;
+		}
+		printf("Setting %s to %0.1f\n", buffer, 
+			settings->af[i-1] / 1000.0f);
+		af = pcimax_get_af_code(settings->af[i-1]);
+		pcimax_send_command(fd, buffer, &af, 1);
 	}
 
 	/* setting ECC code (country code, value range 1..5 + offset) */
@@ -544,27 +571,6 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 	}
 }
 
-/* initializes the settings structure with sensible default values */
-static void pcimax_init_settings(struct pcimax_settings* settings)
-{
-	/* initialize all fields to 0 */
-	memset(settings, 0, sizeof(*settings));
-
-	/* FM-Settings */
-	strncpy(settings->device, pcimax_find_device(), 80);
-	settings->freq = 88700;
-	settings->power = 100;
-	settings->is_stereo = true; 
-
-	/* RDS-Settings */
-	strcpy(settings->pty, "17");
-	strcpy(settings->ps, "unknown");
-	strcpy(settings->rt, "Radiotext undefined");
-	settings->ta = '1';
-	settings->tp = '1';
-	settings->ms = '0';
-}
-
 /* replaces terminating null characters in char arrays (strings) with spaces
  * @string:	ptr to a char array
  * @replacement:character used for replacement
@@ -579,7 +585,7 @@ void pcimax_replace_terminating_null(char *string, char replacement, uint32_t le
 	}
 }
 
-void parse_ecc(struct pcimax_settings *settings, const char *value)
+void pcimax_parse_ecc(struct pcimax_settings *settings, const char *value)
 {
 	settings->defined |= PCIMAX_RDS | PCIMAX_ECC;
 	if (value[0] == 'e' || value[0] == 'E')
@@ -594,7 +600,7 @@ void parse_ecc(struct pcimax_settings *settings, const char *value)
 	}
 }
 
-void parse_pi(struct pcimax_settings *settings, const char *value)
+void pcimax_parse_pi(struct pcimax_settings *settings, const char *value)
 {
 	int tmp = 0;
 	
@@ -607,8 +613,32 @@ void parse_pi(struct pcimax_settings *settings, const char *value)
 	settings->pi[0] = (uint8_t) (tmp >> 8) & 0x0ff;
 }
 
+void pcimax_parse_af(struct pcimax_settings *settings, const char *value)
+{
+	char buffer[10];
+	int length = strlen(value);
+	int pos = 0;
+	int start = 0; 
+	
+	/* find sub-strings, delimited by ',' or ' ' and convert them into
+	 * integer values */ 
+	while(pos <= length) {
+		if (value[pos] == ',' || value[pos] == ' ' || pos == length) {
+			settings->defined |= PCIMAX_PI | PCIMAX_RDS;
+			memset(buffer, 0, 10*sizeof(char));
+			strncpy(buffer, &value[start], pos-start);
+			settings->af[settings->af_size++] = strtof(buffer, NULL) * 1000.0f;
+			start = pos + 1 ;
+			/* pcimax3000+ supports only 7 AFs */	
+			if (settings->af_size >= 7)
+				break;
+		}
+		pos++;
+	}
+}
+
 /* callback function for the ini file parsing library */
-int ini_cb(void* buffer, const char* section, const char* name, const char* value)
+int pcimax_ini_cb(void* buffer, const char* section, const char* name, const char* value)
 {
 	struct pcimax_settings *settings = (struct pcimax_settings*) buffer;
 	int i;
@@ -629,7 +659,7 @@ int ini_cb(void* buffer, const char* section, const char* name, const char* valu
 	
 	/* RDS Settings */
 	if (MATCH("RDS", "pi")) {
-		parse_pi(settings, value);
+		pcimax_parse_pi(settings, value);
 	} else if (MATCH("RDS", "pty")) {
 		settings->defined |= PCIMAX_PTY | PCIMAX_RDS;
 		strncpy(settings->pty, value, 2);
@@ -640,7 +670,7 @@ int ini_cb(void* buffer, const char* section, const char* name, const char* valu
 		settings->defined |= PCIMAX_RT | PCIMAX_RDS;
 		strncpy(settings->rt, value, 64);
 	} else if (MATCH("RDS", "ecc")) {
-		parse_ecc(settings, value);
+		pcimax_parse_ecc(settings, value);
 	} else if (MATCH("RDS", "tp")) {
 		settings->defined |= PCIMAX_TP | PCIMAX_RDS;
 		settings->tp = strcmp(value, "false")? '1' : '0';
@@ -650,6 +680,8 @@ int ini_cb(void* buffer, const char* section, const char* name, const char* valu
 	} else if (MATCH("RDS", "ms")) {
 		settings->defined |= PCIMAX_MS | PCIMAX_RDS;
 		settings->ms = strcmp(value, "false")? '1' : '0';
+	} else if (MATCH("RDS", "af")) {
+		pcimax_parse_af(settings, value);
 	}
 
 	return 0;
@@ -714,8 +746,11 @@ uint32_t pcimax_parse_cl(int argc, char **argv,
 			freq = strtod(optarg, NULL);
 			settings->freq = freq * 1000;
 			break;
+		case OptSetAF:
+			pcimax_parse_af(settings, optarg);
+			break;
 		case OptSetECC:
-			parse_ecc(settings, optarg);
+			pcimax_parse_ecc(settings, optarg);
 			break;
 		case OptSetStereo:
 			settings->defined |= PCIMAX_STEREO | PCIMAX_FM;
@@ -727,7 +762,7 @@ uint32_t pcimax_parse_cl(int argc, char **argv,
 			settings->power = (i >= 0 && i <= 100)? i : 100;
 			break;
 		case OptSetPI:
-			parse_pi(settings, optarg);
+			pcimax_parse_pi(settings, optarg);
 			break;
 		case OptSetPTY:
 			settings->defined |= PCIMAX_PTY | PCIMAX_RDS;
@@ -790,12 +825,11 @@ int main(int argc, char* argv[])
 	memset(&settings, 0, sizeof(settings));
 	
 	/* set up the program settings */
-	//pcimax_init_settings(&settings);
 	pcimax_parse_cl(argc, argv, &settings);
 
 	/* if a ini file was specified, load the values from the file */
 	if (settings.options[OptFile]) {
-		ini_parse(settings.file, ini_cb, &settings);
+		ini_parse(settings.file, pcimax_ini_cb, &settings);
 	}
 
 	/* if no device was specified, try to auto-detect the card */
