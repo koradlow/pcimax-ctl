@@ -22,6 +22,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <sys/ioctl.h>
+#include <sys/inotify.h>
+#include <limits.h>
 #include <string.h>	/* String function definitions */
 #include <unistd.h>	/* UNIX standard function definitions */
 #include <fcntl.h>	/* File control definitions */
@@ -493,24 +495,24 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 	}
 	/* setting TP code */
 	if (settings->defined & PCIMAX_TP) {
-		printf("Setting RDS TP flag to %s\n", (settings->tp) ? "true" : "false");
+		printf("Setting RDS TP flag to %s\n", (settings->tp == '1') ? "true" : "false");
 		pcimax_send_command(fd, "TP", &settings->tp, 1);
 	}
 	/* setting TA code */
 	if (settings->defined & PCIMAX_TA) {
-		printf("Setting RDS TA flag to %s\n", (settings->ta) ? "true" : "false");
+		printf("Setting RDS TA flag to %s\n", (settings->ta == '1') ? "true" : "false");
 		pcimax_send_command(fd, "TA", &settings->ta, 1);
 	}
 	/* setting MS code */
 	if (settings->defined & PCIMAX_MS) {
-		printf("Setting RDS m/s flag to %s\n", (settings->ms) ? "music" : "speech");
+		printf("Setting RDS m/s flag to %s\n", (settings->ms == '1') ? "music" : "speech");
 		pcimax_send_command(fd, "MS", &settings->ms, 1);
 	}
 	/* setting DI code (Decode Information) */
 	if (settings->defined & PCIMAX_DI) {
 		printf("Setting RDS Decoder Information flags\n");
 		printf("  --> mode: %s, artificial head: %c, \n  --> compression: %c, dynamic PTY: %c\n",
-			(settings->is_stereo)? "stereo" : "mono", settings->di_artificial,
+			(settings->is_stereo == '1')? "stereo" : "mono", settings->di_artificial,
 			settings->di_compression, settings->di_dynamic_pty);
 		/* use the FM-Transmitter setting for mono/stereo flag */
 		pcimax_send_command(fd, "Did0", "1", settings->is_stereo);
@@ -653,10 +655,10 @@ void pcimax_parse_af(struct pcimax_settings *settings, const char *value)
 /* callback function for the ini file parsing library */
 int pcimax_ini_cb(void* buffer, const char* section, const char* name, const char* value)
 {
+	#define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
 	struct pcimax_settings *settings = (struct pcimax_settings*) buffer;
 	int i;
 	
-	#define MATCH(s, n) strcmp(section, s) == 0 && strcmp(name, n) == 0
 	/* FM Settings */
 	if (MATCH("FM", "freq")) {
 		settings->defined |= PCIMAX_FREQ | PCIMAX_FM;
@@ -692,7 +694,7 @@ int pcimax_ini_cb(void* buffer, const char* section, const char* name, const cha
 		settings->ta = strcmp(value, "false")? '1' : '0';
 	} else if (MATCH("RDS", "ms")) {
 		settings->defined |= PCIMAX_MS | PCIMAX_RDS;
-		settings->ms = strcmp(value, "false")? '1' : '0';
+		settings->ms = strcmp(value, "music")? '0' : '1';
 	} else if (MATCH("RDS", "af")) {
 		pcimax_parse_af(settings, value);
 	} else if (MATCH("RDS", "di_artificial")) {
@@ -840,10 +842,57 @@ uint32_t pcimax_parse_cl(int argc, char **argv,
 	return 0;
 }
 
+/* a signal handler for the ctrl+c interrupt, in order to end the program
+ * gracefully (restoring terminal settings and closing fd) */
 static void signal_handler_interrupt(int signum)
 {
 	fprintf(stderr, "Interrupt received: Terminating program\n");
 	pcimax_exit(fd, true);
+}
+void pcimax_monitor_loop(int fd, struct pcimax_settings *settings)
+{
+	#define BUF_LEN sizeof(struct inotify_event) + NAME_MAX + 1
+	int notify_fd;
+	int watch_fd;
+	int rd_cnt;
+	char buffer[BUF_LEN];
+
+	/* initialize inotify instance */
+	notify_fd = inotify_init();
+	if (notify_fd == -1) {
+		fprintf(stderr, "Error initializing inotify instance\n");
+		return;
+	}
+
+	/* create a watch descriptor for the config file, sensitive to
+	 * file modifications */
+	watch_fd = inotify_add_watch(notify_fd, settings->file, IN_MODIFY);
+	if (watch_fd == -1) {
+		fprintf(stderr, "Error adding config file to watch list\n");
+		return;
+	}
+	
+	/* read loop */
+	while (true) {
+		printf("\n Monitoring config file for changes\n");
+		printf("End program with ctrl+c\n"); 
+
+		/* wait for file modifications */
+		memset(buffer, 0, BUF_LEN);
+		rd_cnt = read(notify_fd, buffer, BUF_LEN);
+		if (rd_cnt <= 0) {
+			fprintf(stderr, "Error reading from monitored config file\n");
+			return;
+		}
+
+		/* file was modified */
+		ini_parse(settings->file, pcimax_ini_cb, settings);
+		/* update all defined RDS values */
+		if (settings->defined & PCIMAX_FM)
+			pcimax_set_fm_settings(fd, settings);
+		if (settings->defined & PCIMAX_RDS)
+			pcimax_set_rds_settings(fd, settings);
+	}
 }
 
 int main(int argc, char* argv[])
@@ -876,6 +925,10 @@ int main(int argc, char* argv[])
 		pcimax_set_fm_settings(fd, &settings);
 	if (settings.defined & PCIMAX_RDS)
 		pcimax_set_rds_settings(fd, &settings);
+	
+	/* if the monitor option was selected, enter the watch loop */
+	if (settings.options[OptMonitor])
+		pcimax_monitor_loop(fd, &settings);
 
 	/* restore com port settings & close the program  */
 	pcimax_exit(fd, true);
