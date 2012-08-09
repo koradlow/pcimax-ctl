@@ -31,6 +31,7 @@
 #include <getopt.h>
 #include <time.h>
 #include <libudev.h>
+#include <signal.h>
 
 #include "include/inih/ini.h"	/* ini file parsing lib */
 
@@ -54,6 +55,7 @@
 #define PCIMAX_DI	0x20000
 
 static struct termios old_settings;
+static int fd = -1;
 
 /* short options */
 enum Options{
@@ -838,12 +840,20 @@ uint32_t pcimax_parse_cl(int argc, char **argv,
 	return 0;
 }
 
+static void signal_handler_interrupt(int signum)
+{
+	fprintf(stderr, "Interrupt received: Terminating program\n");
+	pcimax_exit(fd, true);
+}
+
 int main(int argc, char* argv[])
 {
-	int fd = -1;
 	static struct pcimax_settings settings;
 	memset(&settings, 0, sizeof(settings));
-	
+
+	/* register signal handler for interrupt signal, to exit gracefully */
+	signal(SIGINT, signal_handler_interrupt);
+
 	/* set up the program settings */
 	pcimax_parse_cl(argc, argv, &settings);
 
