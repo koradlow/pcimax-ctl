@@ -451,7 +451,8 @@ static void pcimax_set_fm_settings(int fd, const struct pcimax_settings *setting
  * highest possible frequency 108MHz maps to 205 */ 
 static char pcimax_get_af_code(uint32_t freq)
 {
-	return (freq - 87500) / 100;
+	/* +4 -> add the offset to skip the reserved control codes */
+	return (freq - 87500) / 100 + 4;
 }
 
 /* TODO: add Country code and AreaCoverage fields to settings, or calculate them
@@ -482,10 +483,10 @@ static void pcimax_set_rds_settings(int fd, const struct pcimax_settings *settin
 		printf("Setting RDS PI to 0x%02x%02x\n", settings->pi[0], 
 			settings->pi[1]);
 		/* low byte of PI */
-		sprintf(buffer, "%03u", settings->pi[1]);
+		sprintf(buffer, "%03u", settings->pi[0]);
 		pcimax_send_command(fd, "CCAC", buffer, 3);
 		/* Program reference, high byte of PI */
-		sprintf(buffer, "%03u", settings->pi[0]);
+		sprintf(buffer, "%03u", settings->pi[1]);
 		pcimax_send_command(fd, "PREF", buffer, 3);
 	}
 	/* setting PTY code */
